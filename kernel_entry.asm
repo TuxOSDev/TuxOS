@@ -3,6 +3,7 @@
 [extern kernel_main]
 global start
 start:
-    mov esp, 0x90000        ; stack top (we can also reuse stack from bootloader)
+    mov esp, 0x90000        ; stack top
+    push eax                ; Pass Framebuffer base pointer as the first parameter
     call kernel_main
     jmp $

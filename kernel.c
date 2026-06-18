@@ -1,77 +1,255 @@
-/* kernel.c - TuxOS 0.2.2 – piece of dog shit */
+/* kernel.c - TuxOS 0.2.3 – Lean Monolithic Stack */
 
-#define VIDEO_MEMORY 0xB8000
-#define MAX_ROWS 25
-#define MAX_COLS 80
-#define WHITE_ON_BLACK 0x0F
-#define BLUE_BG       0x1F
-#define GREEN_ON_BLACK 0x0A
+typedef unsigned int uint32_t;
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+
+#define VBE_DISPI_IOPORT_INDEX 0x01CE
+#define VBE_DISPI_IOPORT_DATA  0x01CF
+
+#define VBE_DISPI_INDEX_XRES        1
+#define VBE_DISPI_INDEX_YRES        2
+#define VBE_DISPI_INDEX_BPP         3
+#define VBE_DISPI_INDEX_ENABLE      4
+
+#define VBE_DISPI_DISABLED          0x00
+#define VBE_DISPI_ENABLED           0x01
+#define VBE_DISPI_LFB_ENABLED       0x40
+
+static int screen_width  = 800;
+static int screen_height = 600;
+static int bytes_per_pixel = 4;
+static int screen_pitch  = 3200;
+
+#define MAX_ROWS 37
+#define MAX_COLS 100
+
+void put_pixel(int x, int y, uint32_t color);
+void draw_char_gfx(int col, int row, char c, uint32_t fg, uint32_t bg);
+void clear_screen();
+void print_char(char c);
+void print_string(const char *str);
+static int get_scancode();
+static int kbhit();
+void int_to_str(int num, char *buf);
+int rand_range(int min, int max);
+int strlen(const char *s);
+
+#define COLOR_WHITE      0xFFFFFF
+#define COLOR_BLACK      0x000000
+#define COLOR_BLUE       0x1A1B26
+#define COLOR_GREEN      0x00FF00
+#define COLOR_RED        0xFF0000
 
 #define KEYBOARD_DATA_PORT   0x60
 #define KEYBOARD_STATUS_PORT 0x64
 
+static uint8_t* framebuffer = 0;
 static int cursor_row = 0;
 static int cursor_col = 0;
-static unsigned int boot_epoch = 0;          /* RTC seconds at boot */
+static unsigned int boot_epoch = 0;
 static unsigned int random_seed = 0;
 
-/* --- Low‑level I/O --- */
-static inline unsigned char inb(unsigned short port) {
-    unsigned char ret;
+static const unsigned char font8x8[128][8] = {
+    [' '] = {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    ['!'] = {0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x00},
+    ['"'] = {0x36,0x36,0x36,0x00,0x00,0x00,0x00,0x00},
+    ['#'] = {0x36,0x36,0x7f,0x36,0x7f,0x36,0x36,0x00},
+    ['$'] = {0x12,0x3e,0x50,0x3c,0x12,0x7c,0x12,0x00},
+    ['%'] = {0x63,0x66,0x30,0x18,0x0c,0x66,0x63,0x00},
+    ['&'] = {0x38,0x6c,0x78,0x38,0x6c,0x6c,0x3a,0x00},
+    ['\'']= {0x18,0x18,0x18,0x00,0x00,0x00,0x00,0x00},
+    ['('] = {0x0c,0x18,0x30,0x30,0x30,0x18,0x0c,0x00},
+    [')'] = {0x30,0x18,0x0c,0x0c,0x0c,0x18,0x30,0x00},
+    ['*'] = {0x00,0x66,0x3c,0xff,0x3c,0x66,0x00,0x00},
+    ['+'] = {0x00,0x18,0x18,0x7e,0x18,0x18,0x00,0x00},
+    [','] = {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30},
+    ['-'] = {0x00,0x00,0x00,0x7e,0x00,0x00,0x00,0x00},
+    ['.'] = {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00},
+    ['/'] = {0x03,0x06,0x0c,0x18,0x30,0x60,0xc0,0x00},
+    ['0'] = {0x3e,0x63,0x67,0x6f,0x7b,0x63,0x3e,0x00},
+    ['1'] = {0x0c,0x1c,0x0c,0x0c,0x0c,0x0c,0x3e,0x00},
+    ['2'] = {0x3e,0x63,0x06,0x1c,0x30,0x63,0x7f,0x00},
+    ['3'] = {0x3e,0x63,0x06,0x1c,0x06,0x63,0x3e,0x00},
+    ['4'] = {0x06,0x0e,0x1e,0x36,0x7f,0x06,0x06,0x00},
+    ['5'] = {0x7f,0x60,0x7e,0x03,0x03,0x63,0x3e,0x00},
+    ['6'] = {0x1e,0x30,0x60,0x7e,0x63,0x63,0x3e,0x00},
+    ['7'] = {0x7f,0x63,0x06,0x0c,0x18,0x18,0x18,0x00},
+    ['8'] = {0x3e,0x63,0x63,0x3e,0x63,0x63,0x3e,0x00},
+    ['9'] = {0x3e,0x63,0x63,0x7f,0x03,0x06,0x3c,0x00},
+    [':'] = {0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00},
+    [';'] = {0x00,0x18,0x18,0x00,0x18,0x18,0x30,0x00},
+    ['<'] = {0x0c,0x18,0x30,0x60,0x30,0x18,0x0c,0x00},
+    ['='] = {0x00,0x7e,0x00,0x7e,0x00,0x00,0x00,0x00},
+    ['>'] = {0x30,0x18,0x0c,0x06,0x0c,0x18,0x30,0x00},
+    ['?'] = {0x3e,0x63,0x06,0x0c,0x18,0x00,0x18,0x00},
+    ['@'] = {0x3e,0x63,0x6f,0x6b,0x6f,0x60,0x3e,0x00},
+    ['A'] = {0x18,0x3c,0x66,0x66,0x7e,0x66,0x66,0x00},
+    ['B'] = {0x7c,0x66,0x66,0x7c,0x66,0x66,0x7c,0x00},
+    ['C'] = {0x3e,0x63,0x60,0x60,0x60,0x63,0x3e,0x00},
+    ['D'] = {0x78,0x6c,0x66,0x66,0x66,0x6c,0x78,0x00},
+    ['E'] = {0x7f,0x60,0x60,0x78,0x60,0x60,0x7f,0x00},
+    ['F'] = {0x7f,0x60,0x60,0x78,0x60,0x60,0x60,0x00},
+    ['G'] = {0x3e,0x63,0x60,0x6f,0x63,0x63,0x3e,0x00},
+    ['H'] = {0x66,0x66,0x66,0x7e,0x66,0x66,0x66,0x00},
+    ['I'] = {0x3e,0x0c,0x0c,0x0c,0x0c,0x0c,0x3e,0x00},
+    ['J'] = {0x1f,0x06,0x06,0x06,0x06,0x66,0x3c,0x00},
+    ['K'] = {0x66,0x6c,0x78,0x70,0x78,0x6c,0x66,0x00},
+    ['L'] = {0x60,0x60,0x60,0x60,0x60,0x60,0x7f,0x00},
+    ['M'] = {0x63,0x77,0x7f,0x6b,0x63,0x63,0x63,0x00},
+    ['N'] = {0x63,0x73,0x7b,0x6f,0x67,0x53,0x63,0x00},
+    ['O'] = {0x3e,0x63,0x63,0x63,0x63,0x63,0x3e,0x00},
+    ['P'] = {0x7c,0x66,0x66,0x7c,0x60,0x60,0x60,0x00},
+    ['Q'] = {0x3e,0x63,0x63,0x63,0x6b,0x66,0x3d,0x00},
+    ['R'] = {0x7c,0x66,0x66,0x7c,0x78,0x6c,0x66,0x00},
+    ['S'] = {0x3e,0x63,0x38,0x0e,0x07,0x63,0x3e,0x00},
+    ['T'] = {0x7f,0x49,0x0c,0x0c,0x0c,0x0c,0x0c,0x00},
+    ['U'] = {0x66,0x66,0x66,0x66,0x66,0x66,0x3e,0x00},
+    ['V'] = {0x66,0x66,0x66,0x66,0x66,0x3c,0x18,0x00},
+    ['W'] = {0x63,0x63,0x63,0x6b,0x7f,0x77,0x63,0x00},
+    ['X'] = {0x66,0x66,0x3c,0x18,0x3c,0x66,0x66,0x00},
+    ['Y'] = {0x66,0x66,0x66,0x3c,0x0c,0x0c,0x0c,0x00},
+    ['Z'] = {0x7f,0x46,0x0c,0x18,0x30,0x61,0x7f,0x00},
+    ['a'] = {0x00,0x00,0x3e,0x03,0x3f,0x63,0x3d,0x00},
+    ['b'] = {0x60,0x60,0x7c,0x66,0x66,0x66,0x7c,0x00},
+    ['c'] = {0x00,0x00,0x3e,0x60,0x60,0x63,0x3e,0x00},
+    ['d'] = {0x03,0x03,0x3f,0x63,0x63,0x63,0x3d,0x00},
+    ['e'] = {0x00,0x00,0x3e,0x63,0x7f,0x60,0x3e,0x00},
+    ['f'] = {0x1c,0x36,0x30,0x78,0x30,0x30,0x30,0x00},
+    ['g'] = {0x00,0x00,0x3d,0x63,0x63,0x3f,0x03,0x3e},
+    ['h'] = {0x60,0x60,0x7c,0x66,0x66,0x66,0x66,0x00},
+    ['i'] = {0x0c,0x00,0x1c,0x0c,0x0c,0x0c,0x1e,0x00},
+    ['j'] = {0x06,0x00,0x0e,0x06,0x06,0x66,0x66,0x3c},
+    ['k'] = {0x60,0x60,0x66,0x6c,0x78,0x6c,0x66,0x00},
+    ['l'] = {0x1c,0x0c,0x0c,0x0c,0x0c,0x0c,0x1e,0x00},
+    ['m'] = {0x00,0x00,0x6d,0x7f,0x6b,0x63,0x63,0x00},
+    ['n'] = {0x00,0x00,0x7c,0x66,0x66,0x66,0x66,0x00},
+    ['o'] = {0x00,0x00,0x3e,0x63,0x63,0x63,0x3e,0x00},
+    ['p'] = {0x00,0x00,0x7c,0x66,0x66,0x7c,0x60,0x60},
+    ['q'] = {0x00,0x00,0x3d,0x63,0x63,0x3f,0x03,0x03},
+    ['r'] = {0x00,0x00,0x7c,0x66,0x60,0x60,0x60,0x00},
+    ['s'] = {0x00,0x00,0x3e,0x60,0x3e,0x03,0x3e,0x00},
+    ['t'] = {0x30,0x30,0x7c,0x30,0x30,0x36,0x1c,0x00},
+    ['u'] = {0x00,0x00,0x66,0x66,0x66,0x66,0x3d,0x00},
+    ['v'] = {0x00,0x00,0x66,0x66,0x66,0x3c,0x18,0x00},
+    ['w'] = {0x00,0x00,0x63,0x63,0x6b,0x7f,0x36,0x00},
+    ['x'] = {0x00,0x00,0x66,0x3c,0x18,0x3c,0x66,0x00},
+    ['y'] = {0x00,0x00,0x66,0x66,0x66,0x3f,0x03,0x3e},
+    ['z'] = {0x00,0x00,0x7f,0x0c,0x18,0x30,0x7f,0x00},
+    ['['] = {0x3e,0x30,0x30,0x30,0x30,0x30,0x3e,0x00},
+    ['\\']= {0xc0,0x60,0x30,0x18,0x0c,0x06,0x03,0x00},
+    [']'] = {0x3e,0x06,0x06,0x06,0x06,0x06,0x3e,0x00},
+};
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
     asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
-static inline void outb(unsigned short port, unsigned char data) {
+static inline void outb(uint16_t port, uint8_t data) {
     asm volatile ("outb %0, %1" :: "a"(data), "Nd"(port));
 }
-static inline void outw(unsigned short port, unsigned short data) {
+static inline void outw(uint16_t port, uint16_t data) {
     asm volatile ("outw %0, %1" :: "a"(data), "Nd"(port));
 }
 
-/* --- VGA helpers --- */
-static char *get_video_ptr(int row, int col) {
-    return (char *)(VIDEO_MEMORY + 2 * (row * MAX_COLS + col));
+void write_vbe(uint16_t index, uint16_t value) {
+    outw(VBE_DISPI_IOPORT_INDEX, index);
+    outw(VBE_DISPI_IOPORT_DATA, value);
 }
+
+void set_video_mode(uint16_t width, uint16_t height, uint16_t bpp) {
+    write_vbe(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    write_vbe(VBE_DISPI_INDEX_XRES, width);
+    write_vbe(VBE_DISPI_INDEX_YRES, height);
+    write_vbe(VBE_DISPI_INDEX_BPP, bpp);
+    write_vbe(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+    
+    screen_width = width;
+    screen_height = height;
+    bytes_per_pixel = bpp / 8;
+    screen_pitch = screen_width * bytes_per_pixel;
+}
+
+void put_pixel(int x, int y, uint32_t color) {
+    if (x >= 0 && x < screen_width && y >= 0 && y < screen_height) {
+        int offset = (y * screen_pitch) + (x * bytes_per_pixel);
+        framebuffer[offset]     = color & 0xFF;         
+        framebuffer[offset + 1] = (color >> 8) & 0xFF;  
+        framebuffer[offset + 2] = (color >> 16) & 0xFF; 
+        if (bytes_per_pixel == 4) {
+            framebuffer[offset + 3] = (color >> 24) & 0xFF; 
+        }
+    }
+}
+
+void draw_char_gfx(int col, int row, char c, uint32_t fg, uint32_t bg) {
+    int start_x = col * 8;
+    int start_y = row * 16;
+    unsigned char idx = (unsigned char)c;
+    
+    for (int y = 0; y < 8; y++) {
+        unsigned char row_bits = font8x8[idx][y];
+        for (int x = 0; x < 8; x++) {
+            if (row_bits & (1 << (7 - x))) {
+                put_pixel(start_x + x, start_y + (y * 2), fg);
+                put_pixel(start_x + x, start_y + (y * 2) + 1, fg);
+            } else {
+                put_pixel(start_x + x, start_y + (y * 2), bg);
+                put_pixel(start_x + x, start_y + (y * 2) + 1, bg);
+            }
+        }
+    }
+}
+
 void clear_screen() {
-    for (int i = 0; i < MAX_ROWS * MAX_COLS; i++) {
-        char *p = (char *)(VIDEO_MEMORY + 2*i);
-        *p = ' '; *(p+1) = WHITE_ON_BLACK;
+    for (int y = 0; y < screen_height; y++) {
+        for (int x = 0; x < screen_width; x++) {
+            put_pixel(x, y, COLOR_BLUE);
+        }
     }
     cursor_row = cursor_col = 0;
 }
+
 static void scroll_up() {
-    for (int r = 1; r < MAX_ROWS; r++)
-        for (int c = 0; c < MAX_COLS; c++) {
-            char *dst = get_video_ptr(r-1,c), *src = get_video_ptr(r,c);
-            *dst = *src; *(dst+1) = *(src+1);
+    int line_offset_src = 16 * screen_pitch;
+    int move_size = (screen_height - 16) * screen_pitch;
+    
+    for (int i = 0; i < move_size; i++) {
+        framebuffer[i] = framebuffer[i + line_offset_src];
+    }
+    
+    for (int y = screen_height - 16; y < screen_height; y++) {
+        for (int x = 0; x < screen_width; x++) {
+            put_pixel(x, y, COLOR_BLUE);
         }
-    for (int c = 0; c < MAX_COLS; c++) {
-        char *p = get_video_ptr(MAX_ROWS-1,c);
-        *p = ' '; *(p+1) = WHITE_ON_BLACK;
     }
 }
+
 void print_char(char c) {
-    if (c == '\n') { cursor_col=0; cursor_row++; }
-    else if (c == '\r') { cursor_col=0; }
-    else {
-        char *p = get_video_ptr(cursor_row, cursor_col);
-        *p = c; *(p+1) = WHITE_ON_BLACK;
+    if (c == '\n') { 
+        cursor_col = 0; 
+        cursor_row++; 
+    } else if (c == '\r') { 
+        cursor_col = 0; 
+    } else if (c == '\t') {
+        cursor_col = (cursor_col + 4) & ~3;
+    } else {
+        draw_char_gfx(cursor_col, cursor_row, c, COLOR_WHITE, COLOR_BLUE);
         cursor_col++;
     }
-    if (cursor_col >= MAX_COLS) { cursor_col=0; cursor_row++; }
-    if (cursor_row >= MAX_ROWS) { cursor_row=MAX_ROWS-1; scroll_up(); }
-    unsigned short pos = cursor_row*MAX_COLS + cursor_col;
-    outb(0x3D4,14); outb(0x3D5,(pos>>8)&0xFF);
-    outb(0x3D4,15); outb(0x3D5,pos&0xFF);
+    if (cursor_col >= MAX_COLS) { cursor_col = 0; cursor_row++; }
+    if (cursor_row >= MAX_ROWS) { cursor_row = MAX_ROWS - 1; scroll_up(); }
 }
+
 void print_string(const char *str) {
     while (*str) print_char(*str++);
 }
 
-/* --- Integer to string --- */
 static void reverse_str(char *s, int len) {
     for (int i=0; i<len/2; i++) { char t=s[i]; s[i]=s[len-1-i]; s[len-1-i]=t; }
 }
+
 void int_to_str(int num, char *buf) {
     int i=0, sign=0;
     if (num<0) { sign=1; num=-num; }
@@ -81,18 +259,18 @@ void int_to_str(int num, char *buf) {
     reverse_str(buf,i);
 }
 
-/* --- CMOS / RTC --- */
 static int cmos_read(unsigned char reg) {
-    outb(0x70, (1<<7) | reg);   /* NMI disable + register index */
-    for (volatile int i=0; i<1000; i++);  /* tiny delay */
+    outb(0x70, (1<<7) | reg);
+    for (volatile int i=0; i<1000; i++);
     return inb(0x71);
 }
+
 static unsigned char bcd_to_bin(unsigned char bcd) {
     return ((bcd>>4)*10) + (bcd & 0x0F);
 }
+
 void read_rtc(unsigned char *hour, unsigned char *min, unsigned char *sec,
               unsigned char *day, unsigned char *month, unsigned char *year) {
-    /* wait until update not in progress */
     while (cmos_read(0x0A) & 0x80);
     *sec   = bcd_to_bin(cmos_read(0x00));
     *min   = bcd_to_bin(cmos_read(0x02));
@@ -101,19 +279,19 @@ void read_rtc(unsigned char *hour, unsigned char *min, unsigned char *sec,
     *month = bcd_to_bin(cmos_read(0x08));
     *year  = bcd_to_bin(cmos_read(0x09));
 }
+
 unsigned int rtc_to_epoch(unsigned char h, unsigned char m, unsigned char s,
                           unsigned char d, unsigned char mo, unsigned char y) {
-    /* approximate: month*days... not accurate but good for uptime */
     unsigned int days = (y*365) + (mo*30) + d;
     return (days*86400) + (h*3600) + (m*60) + s;
 }
+
 unsigned int get_rtc_epoch() {
     unsigned char h,m,s,d,mo,y;
     read_rtc(&h,&m,&s,&d,&mo,&y);
     return rtc_to_epoch(h,m,s,d,mo,y);
 }
 
-/* --- Random (LCG) --- */
 static void srand(unsigned int seed) { random_seed = seed; }
 static int rand() {
     random_seed = (1103515245*random_seed + 12345) & 0x7fffffff;
@@ -124,30 +302,32 @@ int rand_range(int min, int max) {
     return min + (rand() % (max - min + 1));
 }
 
-/* --- Kernel panic (unchanged) --- */
+void print_centered(int row, const char *str, uint32_t fg, uint32_t bg) {
+    int len = strlen(str);
+    int start_col = (100 - len) / 2;
+    if (start_col < 0) start_col = 0;
+    
+    for (int i = 0; i < len; i++) {
+        draw_char_gfx(start_col + i, row, str[i], fg, bg);
+    }
+}
+
 void kernel_panic(const char *reason) {
-    for (int i=0; i<MAX_ROWS*MAX_COLS; i++) {
-        char *p = (char*)(VIDEO_MEMORY+2*i);
-        *p = ' '; *(p+1)=BLUE_BG;
+    for (int y = 0; y < screen_height; y++) {
+        for (int x = 0; x < screen_width; x++) {
+            put_pixel(x, y, COLOR_RED);
+        }
     }
-    const char *msg = "KERNEL PANIC :(";
-    int len=0; while(msg[len]) len++;
-    int row=10, col=(MAX_COLS-len)/2;
-    for (int i=0; i<len; i++) {
-        char *p = get_video_ptr(row,col+i);
-        *p=msg[i]; *(p+1)=BLUE_BG;
-    }
-    int rlen=0; while(reason[rlen]) rlen++;
-    row=23; col=(MAX_COLS-rlen)/2;
-    for (int i=0; i<rlen; i++) {
-        char *p = get_video_ptr(row,col+i);
-        *p=reason[i]; *(p+1)=BLUE_BG;
-    }
+    
+    print_centered(14, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", COLOR_WHITE, COLOR_RED);
+    print_centered(16, "KERNEL PANIC :(", COLOR_WHITE, COLOR_RED);
+    print_centered(18, reason, COLOR_WHITE, COLOR_RED);
+    print_centered(20, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", COLOR_WHITE, COLOR_RED);
+    
     asm volatile ("cli; hlt");
     while(1);
 }
 
-/* --- Keyboard input with shift (unchanged) --- */
 static const char scancode_lower[] = {
     0,0,'1','2','3','4','5','6','7','8','9','0','-','=',0,
     0,'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,
@@ -160,8 +340,18 @@ static const char scancode_upper[] = {
     'A','S','D','F','G','H','J','K','L',':','"','~',0,
     '|','Z','X','C','V','B','N','M','<','>','?',0,0,0,' '
 };
+
+static int kbhit() { return inb(KEYBOARD_STATUS_PORT) & 0x01; }
+static int get_scancode() { if (kbhit()) return inb(KEYBOARD_DATA_PORT); return -1; }
+
+static void flush_keyboard() {
+    volatile uint8_t dummy;
+    while (kbhit()) { dummy = inb(KEYBOARD_DATA_PORT); }
+}
+
 int read_line(char *buffer, int max) {
     int pos=0, shift=0;
+    flush_keyboard();
     while (1) {
         while (!(inb(KEYBOARD_STATUS_PORT)&0x01));
         unsigned char sc = inb(KEYBOARD_DATA_PORT);
@@ -170,16 +360,10 @@ int read_line(char *buffer, int max) {
         if (sc==0x0E) {
             if (pos>0 && cursor_col>0) {
                 pos--; cursor_col--;
-                char *p = get_video_ptr(cursor_row,cursor_col);
-                *p=' '; *(p+1)=WHITE_ON_BLACK;
-                unsigned short cur = cursor_row*MAX_COLS+cursor_col;
-                outb(0x3D4,14); outb(0x3D5,(cur>>8)&0xFF);
-                outb(0x3D4,15); outb(0x3D5,cur&0xFF);
+                draw_char_gfx(cursor_col, cursor_row, ' ', COLOR_WHITE, COLOR_BLUE);
             }
         } else if (sc==0x1C) {
-            print_char('\n');
-            buffer[pos]='\0';
-            return pos;
+            print_char('\n'); buffer[pos]='\0'; return pos;
         } else if (sc < sizeof(scancode_lower)) {
             char ascii = shift ? scancode_upper[sc] : scancode_lower[sc];
             if (ascii && pos<max-1) { buffer[pos++]=ascii; print_char(ascii); }
@@ -187,19 +371,12 @@ int read_line(char *buffer, int max) {
     }
 }
 
-/* --- Non‑blocking keyboard for games (unchanged) --- */
-static int kbhit() { return inb(KEYBOARD_STATUS_PORT) & 0x01; }
-static int get_scancode() { if (kbhit()) return inb(KEYBOARD_DATA_PORT); return -1; }
-
-/* --- String utilities --- */
 int strcmp(const char *a, const char *b) {
     while (*a && *a==*b) { a++; b++; }
-    return *a - *b;
+    return *a - b[0];
 }
 int strlen(const char *s) { int l=0; while(*s++) l++; return l; }
-void strcpy(char *dst, const char *src) { while(*src) *dst++ = *src++; *dst=0; }
 
-/* --- Print hex (unchanged) --- */
 void print_hex(unsigned int num) {
     char buf[16]; int i=0;
     if (!num) { print_string("0"); return; }
@@ -209,106 +386,47 @@ void print_hex(unsigned int num) {
     print_string(buf);
 }
 
-/* ===========================================================
-   GUESS THE NUMBER
-   =========================================================== */
-void guess_game() {
-    int number = rand_range(1, 100);
-    int guess, attempts = 0;
-    char input[32];
-    clear_screen();
-    print_string("I'm thinking of a number between 1 and 100.\n");
-    while (1) {
-        print_string("Your guess: ");
-        int len = read_line(input, sizeof(input));
-        if (len==0) continue;
-        guess = 0;
-        for (int i=0; input[i]; i++) guess = guess*10 + (input[i]-'0');
-        attempts++;
-        if (guess < number) print_string("Too low!\n");
-        else if (guess > number) print_string("Too high!\n");
-        else {
-            print_string("Correct! You got it in ");
-            char buf[8]; int_to_str(attempts, buf);
-            print_string(buf); print_string(" tries.\n");
-            break;
-        }
-    }
-    print_string("Press any key...");
-    while (!kbhit());
-    while (kbhit()) get_scancode();
-    clear_screen();
-}
-
-/* ===========================================================
-   FAKE SYSTEM COMMANDS
-   =========================================================== */
 void fake_ps() {
     print_string("PID  USER   TIME   COMMAND\n");
     print_string("  1  root   0:00   init [TuxOS]\n");
     print_string("  2  root   0:00   kshell\n");
     print_string("  3  root   0:01   idle\n");
 }
-void fake_top() {
-    clear_screen();
-    print_string("top - 12:34:56 up 0 days,  0:05,  1 user\n");
-    print_string("Tasks:   3 total,   1 running,   2 sleeping\n");
-    print_string("Mem:    64M total,   12M used,   52M free\n\n");
-    fake_ps();
-    print_string("\nPress any key to exit...");
-    while (!kbhit());
-    while (kbhit()) get_scancode();
-    clear_screen();
-}
+
 void fake_kill(const char *args) {
     int pid = 0;
-    for (int i=0; args[i]; i++) pid = pid*10 + (args[i]-'0');
+    for (int i=0; args[i]; i++) {
+        if(args[i] >= '0' && args[i] <= '9') pid = pid*10 + (args[i]-'0');
+    }
     if (pid==0) { print_string("Usage: kill <pid>\n"); return; }
     print_string("kill: process "); char buf[8]; int_to_str(pid,buf); print_string(buf);
-    print_string(" not found (but pretend it worked).\n");
-}
-void fake_dmesg() {
-    print_string("[ 0.00] TuxOS 0.3 booting...\n");
-    print_string("[ 0.02] VGA text mode 80x25 activated\n");
-    print_string("[ 0.10] PS/2 keyboard detected\n");
-    print_string("[ 0.15] Shell started\n");
-}
-void fake_who() {
-    print_string("root     tty1   May 4 12:34\n");
+    print_string(" terminated successfully.\n");
 }
 
-/* --- Jokes (unchanged) --- */
-void print_sl() {
-    print_string("             (@@@)\n    (------)   |   \n   (_______)| -+- |\n   /       /  |   |\n  oooooooo oooo   oo\nchuff chuff chuff...\n");
+void fake_dmesg() {
+    print_string("[ 0.00] TuxOS 0.2.3 booting...\n");
+    print_string("[ 0.02] VBE BGA controller override bounded safely.\n");
+    print_string("[ 0.10] PS/2 keyboard text metrics updated.\n");
+    print_string("[ 0.15] Shell alignment operational.\n");
 }
-void print_nyancat() {
-    print_string("+      o     +              o\n    +             +     +    \n        ,~~~.          \n       (  o o)~~~~~~~~~ \n        \\_/  \\         \n        /   \\  \\       \n       /~~~~~\\  \\      \n+     o       +    o    +\nNyan nyan nyan...\n");
-}
+
+void fake_who() { print_string("root     tty1   Jun 18 11:08\n"); }
+
 void print_rickroll() {
-    print_string("Never gonna give you up\nNever gonna let you down\nNever gonna run around and desert you\nNever gonna make you cry\nNever gonna say goodbye\nNever gonna tell a lie and hurt you\n");
+    print_string("Never gonna give you up\nNever gonna let you down\nNever gonna run around and desert you\n");
 }
+
 void print_fortune() {
     const char *fortunes[] = {
-        "You will write a cool OS.",
         "Bug is just a feature waiting to be found.",
         "Tux is silently judging your code.",
-        "Real programmers use butterflies.",
         "Segmentation fault (core dumped) ... just kidding.",
-        "The answer is 42.",
-        "Don't panic!",
-        "All your base are belong to us."
+        "Don't panic!"
     };
     int n = sizeof(fortunes)/sizeof(fortunes[0]);
     print_string(fortunes[rand()%n]); print_string("\n");
 }
-void cow_say(const char *msg) {
-    int len = strlen(msg);
-    print_char(' ');
-    for (int i=0; i<len+2; i++) print_char('_');
-    print_string("\n< "); print_string(msg); print_string(" >\n ");
-    for (int i=0; i<len+2; i++) print_char('-');
-    print_string("\n        \\   ^__^\n         \\  (oo)\\_______\n            (__)\\       )\\/\\\n                ||----w |\n                ||     ||\n");
-}
+
 void print_ascii_table() {
     for (int i=32; i<127; i+=8) {
         for (int j=0; j<8 && i+j<127; j++) { char buf[8]={i+j,' ',0}; print_string(buf); }
@@ -316,7 +434,6 @@ void print_ascii_table() {
     }
 }
 
-/* --- Calculator (unchanged) --- */
 int calc_expression(const char *expr) {
     int num1=0, num2=0, i=0; char op=0;
     while (expr[i]==' ') i++;
@@ -333,305 +450,106 @@ int calc_expression(const char *expr) {
     return 0;
 }
 
-/* ===========================================================
-   COMMAND SHELL (massive!)
-   =========================================================== */
+void guess_game() {
+    int number = rand_range(1, 100);
+    int guess, attempts = 0; char input[32];
+    clear_screen();
+    print_string("Guess a number between 1 and 100.\n");
+    while (1) {
+        print_string("Guess: ");
+        int len = read_line(input, sizeof(input));
+        if (len==0) continue;
+        guess = 0;
+        for (int i=0; input[i]; i++) guess = guess*10 + (input[i]-'0');
+        attempts++;
+        if (guess < number) print_string("Too low!\n");
+        else if (guess > number) print_string("Too high!\n");
+        else {
+            print_string("Correct! Attempts: ");
+            char buf[8]; int_to_str(attempts, buf);
+            print_string(buf); print_string("\n");
+            break;
+        }
+    }
+    print_string("Press any key to drop to system...");
+    while (!kbhit());
+    flush_keyboard();
+    clear_screen();
+}
+
 void shell() {
     char input[128];
     while (1) {
         print_string("TuxOS> ");
         int len = read_line(input, sizeof(input));
         if (len==0) continue;
+        
         char *cmd = input, *args = "";
-        for (int i=0; i<len; i++) if (input[i]==' ') { input[i]=0; args=input+i+1; break; }
+        for (int i=0; i<len; i++) {
+            if (input[i]==' ') { input[i]=0; args=input+i+1; break; }
+        }
 
-        /* --- Core system --- */
         if (!strcmp(cmd,"help")) {
-            print_string("Core: help, whoami, echo, clear, uname, date, ls, pwd, ver, about, tux\n");
-            print_string("System: shutdown, reboot, halt, panic, ps, top, kill, dmesg, who, free, uptime\n");
-            print_string("Utils: calc, hex, random, ascii, strrev, strlen, cowsay, fortune\n");
-            print_string("Games: pong, guess\n");
-            print_string("Fun: sl, nyancat, rickroll\n");
+            print_string("Commands: help, clear, uname, panic, game\n");
+            print_string("System: ps, kill, dmesg, who, free, uptime\n");
+            print_string("Utils: calc, hex, random, ascii, strrev, strlen, fortune\n");
+            print_string("Fun: rickroll\n");
         }
-        else if (!strcmp(cmd,"whoami")) print_string("root\n");
-        else if (!strcmp(cmd,"echo")) { print_string(args); print_string("\n"); }
         else if (!strcmp(cmd,"clear")) clear_screen();
-        else if (!strcmp(cmd,"uname")) { print_string("TuxOS 0.3 (x86)\n"); } /* extended */
-        else if (!strcmp(cmd,"date")) {
-            unsigned char h,m,s,d,mo,y;
-            read_rtc(&h,&m,&s,&d,&mo,&y);
-            char buf[64];
-            int_to_str(2000+y, buf); print_string(buf); print_char('-');
-            if (mo<10) print_char('0'); int_to_str(mo,buf); print_string(buf); print_char('-');
-            if (d<10) print_char('0'); int_to_str(d,buf); print_string(buf); print_char(' ');
-            if (h<10) print_char('0'); int_to_str(h,buf); print_string(buf); print_char(':');
-            if (m<10) print_char('0'); int_to_str(m,buf); print_string(buf); print_char(':');
-            if (s<10) print_char('0'); int_to_str(s,buf); print_string(buf); print_char('\n');
-        }
-        else if (!strcmp(cmd,"ls")) print_string("No filesystem.\n");
-        else if (!strcmp(cmd,"pwd")) print_string("/\n");
-        else if (!strcmp(cmd,"ver")||!strcmp(cmd,"about")) {
-            print_string("TuxOS version 0.3 (Early)\nMade by TuxOSDev\nNo GRUB, pure ASM + C\n");
-        }
-        else if (!strcmp(cmd,"tux")) print_string("   .--.\n  |o_o |\n  |:_/ |\n //   \\ \\\n(|     | )\n/'\\_   _/`\\\n\\___)=(___/\n");
-        else if (!strcmp(cmd,"shutdown")) { outw(0x604,0x2000); asm("cli; hlt"); }
-        else if (!strcmp(cmd,"reboot")) { outb(0x64,0xFE); }
-        else if (!strcmp(cmd,"halt")) kernel_panic("System halted.");
-        else if (!strcmp(cmd,"panic")) kernel_panic(args);
-
-        /* --- System commands --- */
+        else if (!strcmp(cmd,"uname")) print_string("TuxOS 0.2.3 (BGA Native Monolithic)\n");
+        else if (!strcmp(cmd,"panic")) kernel_panic(strlen(args) > 0 ? args : "Manual terminal trip execution.");
+        else if (!strcmp(cmd,"game")) guess_game();
         else if (!strcmp(cmd,"ps")) fake_ps();
-        else if (!strcmp(cmd,"top")) fake_top();
         else if (!strcmp(cmd,"kill")) fake_kill(args);
         else if (!strcmp(cmd,"dmesg")) fake_dmesg();
         else if (!strcmp(cmd,"who")) fake_who();
         else if (!strcmp(cmd,"free")) print_string("Total: 64 MB  Free: 52 MB  Used: 12 MB\n");
         else if (!strcmp(cmd,"uptime")) {
-            unsigned int now = get_rtc_epoch();
-            unsigned int diff = now - boot_epoch;
-            unsigned int d = diff/86400, h = (diff%86400)/3600, m = (diff%3600)/60;
-            char buf[8];
-            print_string("up "); if(d) { int_to_str(d,buf); print_string(buf); print_string(" days, "); }
-            if(h<10) print_char('0'); int_to_str(h,buf); print_string(buf); print_char(':');
-            if(m<10) print_char('0'); int_to_str(m,buf); print_string(buf); print_char('\n');
+            unsigned int diff = get_rtc_epoch() - boot_epoch;
+            char buf[16]; int_to_str(diff, buf);
+            print_string("Uptime: "); print_string(buf); print_string(" seconds.\n");
         }
-
-        /* --- Utils --- */
-        else if (!strcmp(cmd,"calc")) { int res=calc_expression(args); char buf[16]; int_to_str(res,buf); print_string(buf); print_string("\n"); }
+        else if (!strcmp(cmd,"calc")) { 
+            int res=calc_expression(args); char buf[16]; int_to_str(res,buf); 
+            print_string(buf); print_string("\n"); 
+        }
         else if (!strcmp(cmd,"hex")) {
             int num=0; const char *p=args; while (*p>='0'&&*p<='9') { num=num*10+(*p-'0'); p++; }
             print_string("0x"); print_hex(num); print_string("\n");
         }
         else if (!strcmp(cmd,"random")) { print_string("0x"); print_hex(rand()); print_string("\n"); }
         else if (!strcmp(cmd,"ascii")) print_ascii_table();
-        else if (!strcmp(cmd,"strrev")) { char rev[128]; int l=strlen(args); for (int i=0;i<l;i++) rev[i]=args[l-1-i]; rev[l]=0; print_string(rev); print_string("\n"); }
-        else if (!strcmp(cmd,"strlen")) { char buf[8]; int_to_str(strlen(args),buf); print_string(buf); print_string("\n"); }
-        else if (!strcmp(cmd,"cowsay")) cow_say(args);
+        else if (!strcmp(cmd,"strrev")) { 
+            char rev[128]; int l=strlen(args); for (int i=0;i<l;i++) rev[i]=args[l-1-i]; 
+            rev[l]=0; print_string(rev); print_string("\n"); 
+        }
+        else if (!strcmp(cmd,"strlen")) { 
+            char buf[8]; int_to_str(strlen(args),buf); print_string(buf); print_string("\n"); 
+        }
         else if (!strcmp(cmd,"fortune")) print_fortune();
-
-        /* --- Games --- */
-        else if (!strcmp(cmd,"pong")) { /* reuse old pong (still present) */ extern void pong_game(); pong_game(); }
-        else if (!strcmp(cmd,"guess")) guess_game();
-
-        /* --- Fun --- */
-        else if (!strcmp(cmd,"sl")) print_sl();
-        else if (!strcmp(cmd,"nyancat")) print_nyancat();
         else if (!strcmp(cmd,"rickroll")) print_rickroll();
-
-        else { print_string("Unknown. Try 'help'.\n"); }
+        else { print_string("Unknown command. Type 'help'.\n"); }
     }
 }
 
-/* ===========================================================
-   PONG GAME (restored from TuxOS 0.2.1, playable speed)
-   =========================================================== */
-static void draw_paddle(int col, int y) {
-    for (int i = 0; i < 4; i++) {
-        int r = y + i;
-        if (r > 0 && r < MAX_ROWS-1) {
-            char *p = get_video_ptr(r, col);
-            *p = '|';
-            *(p+1) = 0x0F;
-        }
+void kernel_main(uint32_t* vram) {
+    set_video_mode(800, 600, 32);
+
+    if ((uint32_t)vram < 0x00100000) {
+        framebuffer = (uint8_t*)0xFD000000; 
+    } else {
+        framebuffer = (uint8_t*)vram;
     }
-}
-static void clear_paddle(int col, int y) {
-    for (int i = 0; i < 4; i++) {
-        int r = y + i;
-        if (r > 0 && r < MAX_ROWS-1) {
-            char *p = get_video_ptr(r, col);
-            *p = ' ';
-            *(p+1) = 0x0F;
-        }
-    }
-}
-static void draw_ball(int x, int y) {
-    if (y > 0 && y < MAX_ROWS-1 && x > 0 && x < MAX_COLS-1) {
-        char *p = get_video_ptr(y, x);
-        *p = 'O';
-        *(p+1) = 0x0F;
-    }
-}
-static void clear_ball(int x, int y) {
-    if (y > 0 && y < MAX_ROWS-1 && x > 0 && x < MAX_COLS-1) {
-        char *p = get_video_ptr(y, x);
-        *p = ' ';
-        *(p+1) = 0x0F;
-    }
-}
-
-void pong_game() {
-    /* clear screen with black background */
-    for (int i = 0; i < MAX_ROWS * MAX_COLS; i++) {
-        char *p = (char*)(VIDEO_MEMORY + 2*i);
-        *p = ' ';
-        *(p+1) = 0x0F;
-    }
-
-    /* draw borders */
-    for (int c = 0; c < MAX_COLS; c++) {
-        char *top = get_video_ptr(0, c);
-        *top = '-'; *(top+1) = 0x0F;
-        char *bot = get_video_ptr(MAX_ROWS-1, c);
-        *bot = '-'; *(bot+1) = 0x0F;
-    }
-    for (int r = 1; r < MAX_ROWS-1; r++) {
-        char *left = get_video_ptr(r, 0);
-        *left = '|'; *(left+1) = 0x0F;
-        char *right = get_video_ptr(r, MAX_COLS-1);
-        *right = '|'; *(right+1) = 0x0F;
-    }
-
-    int left_y   = MAX_ROWS/2 - 2;
-    int right_y  = MAX_ROWS/2 - 2;
-    int ball_x = MAX_COLS/2, ball_y = MAX_ROWS/2;
-    int ball_dx = 1, ball_dy = 1;
-    int score_left = 0, score_right = 0;
-
-    draw_paddle(2, left_y);
-    draw_paddle(77, right_y);
-    draw_ball(ball_x, ball_y);
-
-    while (1) {
-        /* PLAYABLE SPEED – adjust this number if needed */
-        for (volatile int i = 0; i < 20000000; i++);
-
-        /* read keyboard */
-        int sc;
-        while ((sc = get_scancode()) != -1) {
-            if (sc & 0x80) continue;
-            if (sc == 0x10) {          /* Q to quit */
-                clear_screen();
-                return;
-            }
-            /* left paddle: W / S */
-            if (sc == 0x11) {          /* W */
-                if (left_y > 1) {
-                    clear_paddle(2, left_y);
-                    left_y--;
-                    draw_paddle(2, left_y);
-                }
-            }
-            if (sc == 0x1F) {          /* S */
-                if (left_y + 4 < MAX_ROWS-1) {
-                    clear_paddle(2, left_y);
-                    left_y++;
-                    draw_paddle(2, left_y);
-                }
-            }
-            /* right paddle: Up / Down arrows */
-            if (sc == 0x48) {          /* Up arrow */
-                if (right_y > 1) {
-                    clear_paddle(77, right_y);
-                    right_y--;
-                    draw_paddle(77, right_y);
-                }
-            }
-            if (sc == 0x50) {          /* Down arrow */
-                if (right_y + 4 < MAX_ROWS-1) {
-                    clear_paddle(77, right_y);
-                    right_y++;
-                    draw_paddle(77, right_y);
-                }
-            }
-        }
-
-        /* move ball */
-        clear_ball(ball_x, ball_y);
-        ball_x += ball_dx;
-        ball_y += ball_dy;
-
-        /* bounce off top/bottom */
-        if (ball_y <= 1 || ball_y >= MAX_ROWS-2) {
-            ball_dy = -ball_dy;
-            ball_y += ball_dy;
-        }
-
-        /* paddle collision (left) */
-        if (ball_x == 3) {
-            if (ball_y >= left_y && ball_y < left_y + 4) {
-                ball_dx = 1;
-                ball_x = 3;
-            }
-        }
-        /* paddle collision (right) */
-        if (ball_x == 76) {
-            if (ball_y >= right_y && ball_y < right_y + 4) {
-                ball_dx = -1;
-                ball_x = 76;
-            }
-        }
-
-        /* scoring */
-        if (ball_x <= 1) {
-            score_right++;
-            ball_x = MAX_COLS/2; ball_y = MAX_ROWS/2;
-            ball_dx = 1; ball_dy = 1;
-            /* redraw all */
-            for (int i = 0; i < MAX_ROWS * MAX_COLS; i++) {
-                char *p = (char*)(VIDEO_MEMORY + 2*i);
-                *p = ' ';
-                *(p+1) = 0x0F;
-            }
-            for (int c = 0; c < MAX_COLS; c++) {
-                *get_video_ptr(0, c) = '-'; *(get_video_ptr(0, c)+1) = 0x0F;
-                *get_video_ptr(MAX_ROWS-1, c) = '-'; *(get_video_ptr(MAX_ROWS-1, c)+1) = 0x0F;
-            }
-            for (int r = 1; r < MAX_ROWS-1; r++) {
-                *get_video_ptr(r, 0) = '|'; *(get_video_ptr(r, 0)+1) = 0x0F;
-                *get_video_ptr(r, MAX_COLS-1) = '|'; *(get_video_ptr(r, MAX_COLS-1)+1) = 0x0F;
-            }
-            draw_paddle(2, left_y);
-            draw_paddle(77, right_y);
-        } else if (ball_x >= MAX_COLS-2) {
-            score_left++;
-            ball_x = MAX_COLS/2; ball_y = MAX_ROWS/2;
-            ball_dx = -1; ball_dy = 1;
-            /* redraw all */
-            for (int i = 0; i < MAX_ROWS * MAX_COLS; i++) {
-                char *p = (char*)(VIDEO_MEMORY + 2*i);
-                *p = ' ';
-                *(p+1) = 0x0F;
-            }
-            for (int c = 0; c < MAX_COLS; c++) {
-                *get_video_ptr(0, c) = '-'; *(get_video_ptr(0, c)+1) = 0x0F;
-                *get_video_ptr(MAX_ROWS-1, c) = '-'; *(get_video_ptr(MAX_ROWS-1, c)+1) = 0x0F;
-            }
-            for (int r = 1; r < MAX_ROWS-1; r++) {
-                *get_video_ptr(r, 0) = '|'; *(get_video_ptr(r, 0)+1) = 0x0F;
-                *get_video_ptr(r, MAX_COLS-1) = '|'; *(get_video_ptr(r, MAX_COLS-1)+1) = 0x0F;
-            }
-            draw_paddle(2, left_y);
-            draw_paddle(77, right_y);
-        }
-
-        draw_ball(ball_x, ball_y);
-
-        /* show scores on top row */
-        char buf[8];
-        int_to_str(score_left, buf);
-        for (int i = 0; buf[i]; i++) {
-            char *p = get_video_ptr(0, 35 + i);
-            *p = buf[i];
-        }
-        int_to_str(score_right, buf);
-        for (int i = 0; buf[i]; i++) {
-            char *p = get_video_ptr(0, 43 + i);
-            *p = buf[i];
-        }
-    }
-}
-
-/* --- Kernel entry --- */
-void kernel_main() {
+    
     clear_screen();
-    /* seed random */
+    
     unsigned int seed;
     asm volatile ("rdtsc" : "=A"(seed));
     srand(seed);
-    boot_epoch = get_rtc_epoch();   /* for uptime */
-    print_string("Welcome to TuxOS 0.2.2!\n");
-    print_string("Version: Early 0.2.2, not for public.\n");
+    boot_epoch = get_rtc_epoch();   
+    
+    print_string("Welcome to TuxOS 0.2.3!\n\n");
+    
     shell();
     while(1){}
 }

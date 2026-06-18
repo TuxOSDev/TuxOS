@@ -25,12 +25,9 @@ init_pm:
     call BEGIN_PM            ; call kernel entry point
 
 BEGIN_PM:
-    ; We'll link the kernel to start at 0x100000 (1 MiB) but loaded at 0x1000:0x0
-    ; (physical 0x10000). We'll jump there.
-    ; Our linker script sets KERNEL_OFFSET = 0x100000
-    ; but the kernel was loaded at 0x10000. So we'll relocate or use position-independent code.
-    ; For simplicity, we'll put kernel entry right after the bootloader at 0x7e00.
-    ; Let's design: bootloader loads kernel starting at 0x1000 (segment) = 0x10000.
-    ; Then we jump exactly to 0x10000.
+    ; Read the physical frame buffer pointer we saved in the boot sector
+    mov eax, [0x7C00 + fb_pointer]
+    
+    ; Jump exactly to our kernel start address at 0x10000
     call 0x10000
     jmp $                    ; infinite loop if kernel returns
