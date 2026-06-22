@@ -31,7 +31,7 @@ os-image: boot.bin kernel.bin
 	dd if=/dev/zero bs=512 count=2878 >> os-image.bin
 
 run: os-image
-	qemu-system-i386 -fda os-image.bin -d int -D qemu.log
+	qemu-system-i386 -fda os-image.bin -usb -device usb-tablet -d int -D qemu.log
 
 clean:
 	rm -f *.bin *.o *.elf os-image.bin
