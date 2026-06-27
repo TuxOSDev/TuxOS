@@ -314,7 +314,7 @@ void draw_windows() {
         draw_rect(window_x, window_y, window_width, window_height, COLOR_BLUE);
         draw_rect(window_x, window_y, window_width, 22, COLOR_TITLE_BLUE);
         draw_rect(window_x, window_y + 22, window_width, 1, COLOR_WHITE);
-        
+
         draw_text_absolute(window_x + 6, window_y + 4, "Terminal / Pong Game", COLOR_WHITE, COLOR_TITLE_BLUE);
 
         draw_rect(window_x + window_width - 18, window_y + 3, 14, 14, COLOR_RED);
@@ -526,7 +526,7 @@ void handle_mouse_polling() {
                                mouse_x >= window_x && mouse_x <= window_x + window_width - 20) {
                         is_dragging = 1;
                         drag_offset_x = mouse_x - window_x;
-                        drag_offset_y = mouse_y - window_y; 
+                        drag_offset_y = mouse_y - window_y;
                     } else {
                         if(menu_open) { menu_open = 0; redraw_all(); blit_entire_screen(); }
                     }
@@ -539,7 +539,7 @@ void handle_mouse_polling() {
                     window_x = mouse_x - drag_offset_x;
                     window_y = mouse_y - drag_offset_y;
                     if (window_y < 28) window_y = 28;
-                    
+
                     if (old_wx != window_x || old_wy != window_y) {
                         draw_rect(old_wx, old_wy, window_width, window_height, COLOR_DESKTOP);
                         draw_windows();
@@ -552,7 +552,7 @@ void handle_mouse_polling() {
                     about_x = mouse_x - drag_offset_x;
                     about_y = mouse_y - drag_offset_y;
                     if (about_y < 28) about_y = 28;
-                    
+
                     if (old_ax != about_x || old_ay != about_y) {
                         draw_rect(old_ax, old_ay, about_width, about_height, COLOR_DESKTOP);
                         draw_windows();
@@ -716,7 +716,7 @@ void run_pong_game() {
     draw_text_absolute(window_x + 6, window_y + 4, "Terminal / Pong Game", COLOR_WHITE, COLOR_TITLE_BLUE);
     draw_rect(window_x + window_width - 18, window_y + 3, 14, 14, COLOR_RED);
     draw_text_absolute(window_x + window_width - 14, window_y + 3, "x", COLOR_WHITE, COLOR_RED);
-    
+
     draw_rect(canvas_x, canvas_y, canvas_w, canvas_h, COLOR_BLACK);
 
     while (1) {

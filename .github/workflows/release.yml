@@ -3,7 +3,8 @@ name: Build and Release OS
 on:
   push:
     tags:
-      - 'v*' # Triggers the workflow automatically whenever you push a tag like v1.0, v1.0.0, etc.
+      - 'v*' # suka blyat.
+      - '[0-9]+.[0-9]+.[0-9]+' # ya zayebalsa blya
   workflow_dispatch: # Allows you to manually trigger the build from the GitHub Actions tab
 
 permissions:

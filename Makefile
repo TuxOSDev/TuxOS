@@ -5,7 +5,8 @@ LD = ld
 CFLAGS = -m32 -fno-pie -ffreestanding -c
 LDFLAGS = -m elf_i386 -T linker.ld
 
-all: os-image
+# Build both formats by default
+all: floppy.bin USB-CD.iso
 
 # Bootloader
 boot.bin: boot.asm disk.asm gdt.asm pm-switch.asm
@@ -24,14 +25,31 @@ kernel.bin: kernel_entry.o kernel.o
 	$(LD) $(LDFLAGS) -o kernel.elf kernel_entry.o kernel.o
 	objcopy -O binary kernel.elf kernel.bin
 
-# Build disk image
-os-image: boot.bin kernel.bin
-	cat boot.bin kernel.bin > os-image.bin
-	# Pad to 1.44MB floppy size
-	dd if=/dev/zero bs=512 count=2878 >> os-image.bin
+# Build raw floppy disk image (.bin format preserved)
+floppy.bin: boot.bin kernel.bin
+	cat boot.bin kernel.bin > floppy.bin
+	# Pad to exactly 1.44MB (1440 KB) to satisfy strict El Torito floppy emulation size constraints
+	truncate -s 1440k floppy.bin
 
-run: os-image
-	qemu-system-i386 -fda os-image.bin -usb -device usb-tablet -d int -D qemu.log
+# Build bootable ISO image (.iso support added)
+USB-CD.iso: floppy.bin
+	mkdir -p iso_root
+	cp floppy.bin iso_root/
+	# The boot image pathname (-b) must be relative to the source master directory (iso_root)
+	mkisofs -b floppy.bin -c boot.catalog -o USB-CD.iso iso_root/
 
+# Default run target aliases to floppy simulation
+run: run-floppy
+
+# Emulate raw floppy mode
+run-floppy: floppy.bin
+	qemu-system-i386 -fda floppy.bin -usb -device usb-tablet -d int -D qemu.log
+
+# Emulate CD-ROM mode
+run-iso: USB-CD.iso
+	qemu-system-i386 -cdrom USB-CD.iso -usb -device usb-tablet -d int -D qemu.log
+
+# Clean up workspace completely
 clean:
-	rm -f *.bin *.o *.elf os-image.bin
+	rm -f *.bin *.o *.elf floppy.bin USB-CD.iso
+	rm -rf iso_root
