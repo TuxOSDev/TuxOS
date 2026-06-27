@@ -1,0 +1,39 @@
+name: Build and Release OS
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers the workflow automatically whenever you push a tag like v1.0, v1.0.0, etc.
+  workflow_dispatch: # Allows you to manually trigger the build from the GitHub Actions tab
+
+permissions:
+  contents: write # Grants the workflow write access to create and modify Releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          # nasm: Assembler
+          # gcc-multilib: Provides 32-bit support (-m32) on a 64-bit Ubuntu runner
+          # genisoimage: Provides the 'mkisofs' utility for building the ISO
+          sudo apt-get install -y nasm gcc-multilib genisoimage
+
+      - name: Compile Operating System
+        run: |
+          make clean
+          make
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            floppy.bin
+            USB-CD.iso
+          generate_release_notes: true # Automatically drafts release notes based on commit history
